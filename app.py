@@ -1,7 +1,11 @@
 
 import streamlit as st
 import pandas as pd
+import numpy as np
+import joblib
 import matplotlib.pyplot as plt
+
+from sklearn.metrics import pairwise_distances
 
 st.set_page_config(
     page_title="RFM Customer Segmentation",
@@ -9,151 +13,162 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📊 RFM Customer Segmentation Dashboard")
-st.write(
-    "Explore customer segments created using "
-    "RFM analysis and DBSCAN clustering."
-)
+st.title("📊 RFM Customer Segmentation")
+st.write("Customer segmentation using RFM analysis and DBSCAN.")
 
-# Load the previously clustered dataset
+# Load saved files
+@st.cache_resource
+def load_model():
+    model = joblib.load("dbscan_model.pkl")
+    scaler = joblib.load("rfm_scaler.pkl")
+    return model, scaler
+
 @st.cache_data
 def load_data():
-    data = pd.read_csv("rfm_dbscan_clustered.csv")
-
-    required_columns = [
-        "CustomerID", "Recency", "Frequency",
-        "Monetary", "DBSCAN_Cluster"
-    ]
-
-    missing = [
-        col for col in required_columns
-        if col not in data.columns
-    ]
-
-    if missing:
-        raise ValueError(
-            f"Missing required columns: {missing}"
-        )
-
-    return data
+    return pd.read_csv("rfm_dbscan_clustered.csv")
 
 try:
+    dbscan_model, scaler = load_model()
     df = load_data()
-except Exception as error:
-    st.error(f"Could not load the dataset: {error}")
+except Exception as e:
+    st.error(f"Could not load project files: {e}")
     st.stop()
 
-# Convert cluster labels to integers
-df["DBSCAN_Cluster"] = pd.to_numeric(
-    df["DBSCAN_Cluster"], errors="coerce"
-)
-df = df.dropna(subset=["DBSCAN_Cluster"])
-df["DBSCAN_Cluster"] = df["DBSCAN_Cluster"].astype(int)
-
-# Sidebar filters
-st.sidebar.header("Filters")
-
-include_noise = st.sidebar.checkbox(
-    "Include noise customers (-1)", value=True
-)
-
-available_clusters = sorted(
-    df["DBSCAN_Cluster"].unique().tolist()
-)
-
-if not include_noise:
-    available_clusters = [
-        c for c in available_clusters if c != -1
-    ]
-
-selected_clusters = st.sidebar.multiselect(
-    "Select clusters",
-    options=available_clusters,
-    default=available_clusters
-)
-
-filtered_df = df[
-    df["DBSCAN_Cluster"].isin(selected_clusters)
+# Validate required columns
+required = [
+    "CustomerID", "Recency", "Frequency",
+    "Monetary", "DBSCAN_Cluster"
 ]
 
-# Main metrics
-col1, col2, col3 = st.columns(3)
+if not all(col in df.columns for col in required):
+    st.error("The CSV is missing one or more required columns.")
+    st.stop()
 
-col1.metric("Customers", f"{len(filtered_df):,}")
+st.sidebar.header("Navigation")
 
-col2.metric(
-    "Clusters",
-    filtered_df.loc[
-        filtered_df["DBSCAN_Cluster"] != -1,
-        "DBSCAN_Cluster"
-    ].nunique()
+page = st.sidebar.radio(
+    "Choose a page",
+    ["Dashboard", "Customer Segments", "Try a Customer"]
 )
 
-noise_count = (
-    filtered_df["DBSCAN_Cluster"] == -1
-).sum()
+if page == "Dashboard":
+    st.header("Project Overview")
 
-col3.metric("Noise customers", f"{noise_count:,}")
+    c1, c2, c3 = st.columns(3)
 
-st.divider()
-
-# Cluster distribution
-st.subheader("Customer Distribution by Cluster")
-
-if filtered_df.empty:
-    st.info("Select at least one cluster from the sidebar.")
-else:
-    counts = (
-        filtered_df["DBSCAN_Cluster"]
-        .value_counts()
-        .sort_index()
+    c1.metric("Total Customers", f"{len(df):,}")
+    c2.metric(
+        "Clusters",
+        df.loc[df["DBSCAN_Cluster"] != -1, "DBSCAN_Cluster"].nunique()
+    )
+    c3.metric(
+        "Noise Customers",
+        f"{(df['DBSCAN_Cluster'] == -1).sum():,}"
     )
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    counts = df["DBSCAN_Cluster"].value_counts().sort_index()
+
+    fig, ax = plt.subplots(figsize=(8, 4))
     counts.plot(kind="bar", ax=ax)
-    ax.set_xlabel("DBSCAN Cluster (-1 = Noise)")
-    ax.set_ylabel("Number of Customers")
-    ax.set_title("Customers per Cluster")
-    ax.tick_params(axis="x", rotation=0)
+    ax.set_title("Customer Distribution by DBSCAN Cluster")
+    ax.set_xlabel("Cluster (-1 means noise)")
+    ax.set_ylabel("Customers")
     fig.tight_layout()
 
     st.pyplot(fig)
     plt.close(fig)
 
-    # RFM summary
-    st.subheader("RFM Segment Analysis")
+    st.info(
+        "Selected DBSCAN parameters: eps = 0.837, min_samples = 4."
+    )
 
-    main_customers = filtered_df[
-        filtered_df["DBSCAN_Cluster"] != -1
-    ]
+elif page == "Customer Segments":
+    st.header("Explore Customer Segments")
 
-    if not main_customers.empty:
-        summary = (
-            main_customers
-            .groupby("DBSCAN_Cluster")
-            .agg(
-                Customer_Count=("CustomerID", "count"),
-                Recency_Median=("Recency", "median"),
-                Frequency_Median=("Frequency", "median"),
-                Monetary_Median=("Monetary", "median")
-            )
-            .round(2)
+    clusters = sorted(df["DBSCAN_Cluster"].unique())
+    selected = st.multiselect(
+        "Select cluster labels",
+        clusters,
+        default=clusters
+    )
+
+    filtered = df[df["DBSCAN_Cluster"].isin(selected)]
+
+    st.dataframe(filtered, use_container_width=True)
+
+    summary = (
+        filtered[filtered["DBSCAN_Cluster"] != -1]
+        .groupby("DBSCAN_Cluster")
+        .agg(
+            Customers=("CustomerID", "count"),
+            Median_Recency=("Recency", "median"),
+            Median_Frequency=("Frequency", "median"),
+            Median_Monetary=("Monetary", "median")
         )
+        .round(2)
+    )
 
-        st.dataframe(summary, use_container_width=True)
-    else:
-        st.info("No non-noise clusters are selected.")
-
-    # Customer table
-    st.subheader("Customer Records")
-    st.dataframe(filtered_df, use_container_width=True)
-
-    # Download filtered results
-    csv_data = filtered_df.to_csv(index=False).encode("utf-8")
+    st.subheader("RFM Summary")
+    st.dataframe(summary, use_container_width=True)
 
     st.download_button(
-        "Download Filtered Customer Data",
-        data=csv_data,
-        file_name="filtered_rfm_customers.csv",
-        mime="text/csv"
+        "Download selected customers",
+        filtered.to_csv(index=False).encode("utf-8"),
+        "selected_rfm_customers.csv",
+        "text/csv"
     )
+
+elif page == "Try a Customer":
+    st.header("Explore a New Customer")
+    st.write(
+        "Enter RFM values to find the nearest DBSCAN core sample. "
+        "This is an approximate assignment, not native DBSCAN prediction."
+    )
+
+    recency = st.number_input(
+        "Recency (days)", min_value=0.0, value=30.0
+    )
+    frequency = st.number_input(
+        "Frequency (purchases)", min_value=1.0, value=5.0
+    )
+    monetary = st.number_input(
+        "Monetary (total spend)", min_value=0.0, value=500.0
+    )
+
+    if st.button("Find Approximate Segment"):
+        if len(dbscan_model.core_sample_indices_) == 0:
+            st.error("The saved DBSCAN model has no core samples.")
+        else:
+            new_rfm = pd.DataFrame(
+                [[recency, frequency, monetary]],
+                columns=["Recency", "Frequency", "Monetary"]
+            )
+
+            # This assumes the scaler was fitted on raw RFM columns.
+            # If your training used log1p before scaling, apply it here too.
+            new_scaled = scaler.transform(new_rfm)
+
+            core_points = dbscan_model.components_
+            core_labels = dbscan_model.labels_[
+                dbscan_model.core_sample_indices_
+            ]
+
+            distances = pairwise_distances(new_scaled, core_points)[0]
+            nearest = np.argmin(distances)
+
+            nearest_distance = distances[nearest]
+            predicted_cluster = int(core_labels[nearest])
+
+            if nearest_distance <= dbscan_model.eps:
+                st.success(
+                    f"Approximate cluster assignment: {predicted_cluster}"
+                )
+                st.write(
+                    f"Distance to nearest core sample: "
+                    f"{nearest_distance:.4f}"
+                )
+            else:
+                st.warning(
+                    "This customer is not within eps of any DBSCAN core "
+                    "sample. Treat the customer as unassigned/noise."
+                )
